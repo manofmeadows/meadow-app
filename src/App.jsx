@@ -354,7 +354,7 @@ function Main() {
         <Field label="Nimi"><Inp value={name} onChange={setName} placeholder="Esim. Tarra, Purkki..." /></Field>
         <div className="grid grid-cols-2 gap-2">
           <Field label="Yksikkö"><select value={unit} onChange={e => setUnit(e.target.value)} className="w-full border border-stone-200 rounded-xl px-3 py-2.5 bg-white">
-            {["g","ml","kpl","kg","l"].map(u => <option key={u} value={u}>{u}</option>)}
+            {["g","kg","ml","l","kpl","tl","rkl","dl"].map(u => <option key={u} value={u}>{u}</option>)}
           </select></Field>
           <Field label="Väri"><input type="color" value={color} onChange={e => setColor(e.target.value)} className="w-full h-10 rounded-xl border border-stone-200 cursor-pointer" /></Field>
         </div>
@@ -508,6 +508,79 @@ function Main() {
           </button>
         )}
         <Btn onClick={() => setModal(null)} full className="mt-3" color="stone">Valmis</Btn>
+      </Modal>
+    );
+  };
+
+  const EditOrderModal = ({ order }) => {
+    const [amount, setAmount] = useState(String(order.amount));
+    const [price, setPrice] = useState(String(order.price || ""));
+    const [notes, setNotes] = useState(order.notes || "");
+    const [estDel, setEstDel] = useState(order.estimated_delivery || "");
+    const [deliveredAt, setDeliveredAt] = useState(order.delivered_at || "");
+    const [confirm, setConfirm] = useState(false);
+
+    const save = async () => {
+      const wasDelivered = !!order.delivered_at;
+      const nowDelivered = !!deliveredAt;
+      const amountDiff = parseFloat(amount) - order.amount;
+
+      await supabase.from("orders").update({
+        amount: parseFloat(amount) || order.amount,
+        price: parseFloat(price) || 0,
+        notes,
+        estimated_delivery: estDel || null,
+        delivered_at: deliveredAt || null,
+      }).eq("id", order.id);
+
+      // If delivery status changed or amount changed, adjust stock
+      const ing = ingredients.find(i => i.id === order.ingredient_id);
+      if (ing) {
+        if (!wasDelivered && nowDelivered) {
+          // Newly delivered → add stock
+          await supabase.from("ingredients").update({ stock: ing.stock + parseFloat(amount) }).eq("id", ing.id);
+        } else if (wasDelivered && !nowDelivered) {
+          // Undelivered → remove stock
+          await supabase.from("ingredients").update({ stock: Math.max(0, ing.stock - order.amount) }).eq("id", ing.id);
+        } else if (wasDelivered && nowDelivered && amountDiff !== 0) {
+          // Amount changed on delivered order → adjust difference
+          await supabase.from("ingredients").update({ stock: Math.max(0, ing.stock + amountDiff) }).eq("id", ing.id);
+        }
+      }
+
+      show("✅ Tilaus päivitetty!"); refetch(); setModal(null);
+    };
+
+    const remove = async () => {
+      // If was delivered, remove stock
+      if (order.delivered_at) {
+        const ing = ingredients.find(i => i.id === order.ingredient_id);
+        if (ing) await supabase.from("ingredients").update({ stock: Math.max(0, ing.stock - order.amount) }).eq("id", ing.id);
+      }
+      await supabase.from("orders").delete().eq("id", order.id);
+      show("Tilaus poistettu"); refetch(); setModal(null);
+    };
+
+    return (
+      <Modal onClose={() => setModal(null)}>
+        <h3 className="text-xl font-bold mb-1">✏️ {order.ingredient_name}</h3>
+        <p className="text-xs text-stone-400 mb-4">Tilattu {dateStr(order.order_date)} · {order.supplier}</p>
+        <Field label={`Määrä (${order.unit})`}><Inp type="number" value={amount} onChange={setAmount} big /></Field>
+        <Field label="Hinta €"><Inp type="number" value={price} onChange={setPrice} placeholder="0.00" /></Field>
+        <Field label="Arvioitu toimitus"><Inp type="date" value={estDel} onChange={setEstDel} /></Field>
+        <Field label="Toteutunut toimitus (tyhjennä peruaksesi vastaanoton)"><Inp type="date" value={deliveredAt} onChange={setDeliveredAt} /></Field>
+        <Field label="Muistiinpanot"><Inp value={notes} onChange={setNotes} placeholder="Huomiot, tilausnumero..." /></Field>
+        <div className="flex gap-2">
+          <BtnOutline onClick={() => setModal(null)} full>Peruuta</BtnOutline>
+          <Btn onClick={save} full>Tallenna ✓</Btn>
+        </div>
+        <div className="mt-4 pt-3 border-t border-stone-200">
+          {!confirm ? (
+            <button onClick={() => setConfirm(true)} className="text-sm text-red-500 w-full text-center">Poista tilaus...</button>
+          ) : (
+            <div className="flex gap-2"><BtnOutline onClick={() => setConfirm(false)} full>Peruuta</BtnOutline><Btn onClick={remove} full color="red">Poista pysyvästi</Btn></div>
+          )}
+        </div>
       </Modal>
     );
   };
@@ -748,8 +821,8 @@ function Main() {
           {openOrders.map(o => (
             <div key={o.id} className="bg-white rounded-2xl border border-stone-200 p-4 mb-2">
               <div className="flex justify-between items-start">
-                <div className="flex-1">
-                  <div className="font-bold">{o.ingredient_name}</div>
+                <div className="flex-1 cursor-pointer" onClick={() => setModal({ type: "editOrder", order: o })}>
+                  <div className="font-bold">{o.ingredient_name} <span className="text-stone-300 text-sm">✏️</span></div>
                   <div className="text-sm text-stone-500">{fmt(o.amount)} {o.unit} · {o.supplier}</div>
                   <div className="text-xs text-stone-400">Tilattu {dateStr(o.order_date)} · Arvio {dateStr(o.estimated_delivery)}</div>
                   {o.notes && <div className="text-xs text-stone-400 italic mt-1">"{o.notes}"</div>}
@@ -765,9 +838,9 @@ function Main() {
         <div>
           <h3 className="font-bold text-stone-500 text-sm mb-2">✅ Toimitetut</h3>
           {orders.filter(o => o.delivered_at).slice(0, 15).map(o => (
-            <div key={o.id} className="bg-stone-50 rounded-xl p-3 mb-1.5 text-sm">
+            <div key={o.id} className="bg-stone-50 rounded-xl p-3 mb-1.5 text-sm cursor-pointer active:bg-stone-100" onClick={() => setModal({ type: "editOrder", order: o })}>
               <div className="flex justify-between">
-                <span><span className="font-medium">{o.ingredient_name}</span><span className="text-stone-400"> · {fmt(o.amount)} {o.unit}</span></span>
+                <span><span className="font-medium">{o.ingredient_name}</span><span className="text-stone-400"> · {fmt(o.amount)} {o.unit}</span> <span className="text-stone-300">✏️</span></span>
                 <span className="text-stone-400 text-xs">{dateStr(o.delivered_at)}</span>
               </div>
               {o.notes && <div className="text-xs text-stone-400 italic">"{o.notes}"</div>}
@@ -826,6 +899,7 @@ function Main() {
       {modal?.type === "editProduct" && <EditProductModal product={modal.product} />}
       {modal?.type === "recipe" && <RecipeModal product={modal.product} />}
       {modal?.type === "settings" && <SettingsModal />}
+      {modal?.type === "editOrder" && <EditOrderModal order={modal.order} />}
 
       {/* Header */}
       <div className="bg-white border-b border-stone-200 px-4 py-3 sticky top-0 z-20">
