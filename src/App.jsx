@@ -1,683 +1,852 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { supabase } from "./supabase";
 
-// Recipe constants (these define the product)
-const RECIPE = [
-  { name: "Naudan tali", perJar: 41.9, unit: "g", supplier: "Paikallinen farmi", leadDays: 3, minOrder: 5000, color: "#F5B041" },
-  { name: "Mehiläisvaha", perJar: 4.5, unit: "g", supplier: "Suomalainen tuottaja", leadDays: 5, minOrder: 1000, color: "#F7DC6F" },
-  { name: "Oliiviöljy", perJar: 10.0, unit: "ml", supplier: "S-market", leadDays: 1, minOrder: 1000, color: "#82E0AA" },
-  { name: "Tea tree -öljy", perJar: 1.5, unit: "ml", supplier: "Saksalainen toimittaja", leadDays: 14, minOrder: 100, color: "#85C1E9" },
-  { name: "Kehäkukka", perJar: 1.05, unit: "g", supplier: "Saksalainen toimittaja", leadDays: 14, minOrder: 200, color: "#D2B4DE" },
-  { name: "Salvia", perJar: 1.05, unit: "g", supplier: "Saksalainen toimittaja", leadDays: 14, minOrder: 150, color: "#AED6F1" },
-];
-
+// ─── UTILS ───────────────────────────────────
 const fmt = (n) => Math.round(n).toLocaleString("fi-FI");
-const fmtDec = (n) => n.toLocaleString("fi-FI", { maximumFractionDigits: 1 });
+const fmtDec = (n, d = 1) => Number(n).toLocaleString("fi-FI", { minimumFractionDigits: d, maximumFractionDigits: d });
+const fmtEur = (n) => Number(n).toLocaleString("fi-FI", { style: "currency", currency: "EUR" });
 const dateStr = (d) => d ? new Date(d).toLocaleDateString("fi-FI") : "–";
 const today = () => new Date().toISOString().split("T")[0];
 
-// ─── HOOKS ───────────────────────────────────────
-function useSupabaseData() {
+// ─── DATA HOOK ───────────────────────────────
+function useData() {
+  const [products, setProducts] = useState([]);
   const [ingredients, setIngredients] = useState([]);
+  const [recipeItems, setRecipeItems] = useState([]);
   const [productions, setProductions] = useState([]);
   const [orders, setOrders] = useState([]);
-  const [settings, setSettings] = useState({ weekly_rate: 70, safety_weeks: 3, jars_in_warehouse: 0 });
+  const [settings, setSettings] = useState({ safety_weeks: 3 });
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
 
-  const fetchAll = useCallback(async () => {
-    try {
-      const [ingRes, prodRes, ordRes, setRes] = await Promise.all([
-        supabase.from("ingredients").select("*").order("id"),
-        supabase.from("productions").select("*").order("created_at", { ascending: false }),
-        supabase.from("orders").select("*").order("created_at", { ascending: false }),
-        supabase.from("settings").select("*").limit(1).single(),
-      ]);
-
-      if (ingRes.data) setIngredients(ingRes.data);
-      if (prodRes.data) setProductions(prodRes.data);
-      if (ordRes.data) setOrders(ordRes.data);
-      if (setRes.data) setSettings(setRes.data);
-      
-      // If no ingredients exist, seed them
-      if (!ingRes.data || ingRes.data.length === 0) {
-        const seedData = RECIPE.map(r => ({
-          name: r.name, per_jar: r.perJar, unit: r.unit, supplier: r.supplier,
-          lead_days: r.leadDays, min_order: r.minOrder, color: r.color, stock: 0
-        }));
-        const { data } = await supabase.from("ingredients").insert(seedData).select();
-        if (data) setIngredients(data);
-      }
-      
-      // If no settings exist, seed them
-      if (!setRes.data) {
-        const { data } = await supabase.from("settings").insert({ weekly_rate: 70, safety_weeks: 3, jars_in_warehouse: 0 }).select().single();
-        if (data) setSettings(data);
-      }
-
-      setError(null);
-    } catch (e) {
-      setError("Yhteysvirhe – tarkista nettiyhteys");
-      console.error(e);
-    } finally {
-      setLoading(false);
-    }
+  const fetch = useCallback(async () => {
+    const [p, i, r, pr, o, s] = await Promise.all([
+      supabase.from("products").select("*").order("id"),
+      supabase.from("ingredients").select("*").order("id"),
+      supabase.from("recipe_items").select("*"),
+      supabase.from("productions").select("*").order("created_at", { ascending: false }),
+      supabase.from("orders").select("*").order("created_at", { ascending: false }),
+      supabase.from("settings").select("*").limit(1).single(),
+    ]);
+    if (p.data) setProducts(p.data);
+    if (i.data) setIngredients(i.data);
+    if (r.data) setRecipeItems(r.data);
+    if (pr.data) setProductions(pr.data);
+    if (o.data) setOrders(o.data);
+    if (s.data) setSettings(s.data);
+    setLoading(false);
   }, []);
 
-  // Initial fetch
-  useEffect(() => { fetchAll(); }, [fetchAll]);
+  useEffect(() => { fetch(); }, [fetch]);
 
-  // Realtime subscriptions
   useEffect(() => {
-    const channel = supabase.channel("meadow-realtime")
-      .on("postgres_changes", { event: "*", schema: "public", table: "ingredients" }, () => fetchAll())
-      .on("postgres_changes", { event: "*", schema: "public", table: "productions" }, () => fetchAll())
-      .on("postgres_changes", { event: "*", schema: "public", table: "orders" }, () => fetchAll())
-      .on("postgres_changes", { event: "*", schema: "public", table: "settings" }, () => fetchAll())
+    const ch = supabase.channel("rt")
+      .on("postgres_changes", { event: "*", schema: "public", table: "products" }, fetch)
+      .on("postgres_changes", { event: "*", schema: "public", table: "ingredients" }, fetch)
+      .on("postgres_changes", { event: "*", schema: "public", table: "recipe_items" }, fetch)
+      .on("postgres_changes", { event: "*", schema: "public", table: "productions" }, fetch)
+      .on("postgres_changes", { event: "*", schema: "public", table: "orders" }, fetch)
+      .on("postgres_changes", { event: "*", schema: "public", table: "settings" }, fetch)
       .subscribe();
+    return () => supabase.removeChannel(ch);
+  }, [fetch]);
 
-    return () => { supabase.removeChannel(channel); };
-  }, [fetchAll]);
-
-  return { ingredients, productions, orders, settings, loading, error, refetch: fetchAll };
+  return { products, ingredients, recipeItems, productions, orders, settings, loading, refetch: fetch };
 }
 
-// ─── MAIN APP ────────────────────────────────────
-export default function App() {
-  const [authed, setAuthed] = useState(false);
+// ─── SHARED COMPONENTS ───────────────────────
+function Modal({ children, onClose }) {
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-30 animate-fade-in" onClick={onClose}>
+      <div className="bg-white rounded-t-3xl sm:rounded-3xl p-5 w-full max-w-md max-h-[85vh] overflow-y-auto animate-slide-up" onClick={e => e.stopPropagation()}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function Field({ label, children }) {
+  return <div className="mb-3"><label className="text-xs text-stone-500 block mb-1">{label}</label>{children}</div>;
+}
+
+function Inp({ type = "text", value, onChange, placeholder, className = "", big, ...props }) {
+  return <input type={type} inputMode={type === "number" ? "decimal" : undefined} value={value} onChange={e => onChange(e.target.value)}
+    placeholder={placeholder} className={`w-full border border-stone-200 rounded-xl px-3 py-2.5 focus:border-emerald-500 focus:outline-none ${big ? "text-2xl font-bold text-center border-2" : ""} ${className}`} {...props} />;
+}
+
+function Btn({ children, onClick, disabled, color = "emerald", full, className = "" }) {
+  const colors = { emerald: "bg-emerald-600 hover:bg-emerald-700", purple: "bg-purple-600 hover:bg-purple-700", red: "bg-red-600 hover:bg-red-700", stone: "bg-stone-700 hover:bg-stone-800", amber: "bg-amber-600 hover:bg-amber-700" };
+  return <button onClick={onClick} disabled={disabled}
+    className={`${full ? "w-full" : ""} py-3 px-4 rounded-xl text-white font-bold disabled:opacity-30 transition-all active:scale-[0.98] ${colors[color]} ${className}`}>{children}</button>;
+}
+
+function BtnOutline({ children, onClick, full }) {
+  return <button onClick={onClick} className={`${full ? "w-full" : ""} py-3 px-4 rounded-xl border border-stone-300 text-stone-600 font-medium`}>{children}</button>;
+}
+
+function StatusBadge({ color, label }) {
+  const c = { red: "bg-red-100 text-red-700 border-red-200", amber: "bg-amber-100 text-amber-700 border-amber-200", emerald: "bg-emerald-100 text-emerald-700 border-emerald-200" };
+  return <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${c[color]}`}>{label}</span>;
+}
+
+function Metric({ label, value, sub, alert }) {
+  return (
+    <div className={`rounded-2xl p-3.5 ${alert === "red" ? "bg-red-50 border-2 border-red-200" : alert === "amber" ? "bg-amber-50 border-2 border-amber-200" : "bg-white border border-stone-200"}`}>
+      <div className="text-[11px] text-stone-500 mb-0.5">{label}</div>
+      <div className={`text-xl font-bold ${alert === "red" ? "text-red-600" : alert === "amber" ? "text-amber-600" : "text-stone-800"}`}>{value}</div>
+      {sub && <div className="text-[11px] text-stone-400 mt-0.5">{sub}</div>}
+    </div>
+  );
+}
+
+// ─── AUTH ─────────────────────────────────────
+function PinScreen({ onAuth }) {
   const [pin, setPin] = useState("");
-  const correctPin = import.meta.env.VITE_APP_PIN || "1234";
-
-  // Check stored auth
-  useEffect(() => {
-    if (sessionStorage.getItem("meadow-auth") === "true") setAuthed(true);
-  }, []);
-
-  const handleLogin = () => {
-    if (pin === correctPin) {
-      setAuthed(true);
-      sessionStorage.setItem("meadow-auth", "true");
-    } else {
-      setPin("");
-    }
+  const [shake, setShake] = useState(false);
+  const correct = import.meta.env.VITE_APP_PIN || "1234";
+  const tryLogin = () => {
+    if (pin === correct) { sessionStorage.setItem("meadow-auth", "1"); onAuth(); }
+    else { setShake(true); setPin(""); setTimeout(() => setShake(false), 500); }
   };
-
-  if (!authed) {
-    return (
-      <div className="min-h-screen bg-stone-50 flex items-center justify-center px-4">
-        <div className="bg-white rounded-3xl shadow-lg p-8 w-full max-w-xs text-center">
-          <div className="text-5xl mb-3">🌿</div>
-          <h1 className="text-2xl font-bold text-stone-800 mb-1">Meadow</h1>
-          <p className="text-sm text-stone-400 mb-6">Tuotannon hallinta</p>
-          <input
-            type="password"
-            inputMode="numeric"
-            placeholder="PIN-koodi"
-            value={pin}
-            onChange={e => setPin(e.target.value)}
-            onKeyDown={e => e.key === "Enter" && handleLogin()}
-            className="w-full border-2 border-stone-200 rounded-2xl px-4 py-4 text-center text-2xl tracking-widest font-bold focus:border-emerald-500 focus:outline-none"
-            autoFocus
-          />
-          <button onClick={handleLogin}
-            className="w-full mt-4 py-4 rounded-2xl bg-emerald-600 text-white font-bold text-lg hover:bg-emerald-700 transition-colors">
-            Kirjaudu
-          </button>
-        </div>
+  return (
+    <div className="min-h-screen bg-stone-50 flex items-center justify-center px-4">
+      <div className={`bg-white rounded-3xl shadow-lg p-8 w-full max-w-xs text-center ${shake ? "animate-[shake_0.5s]" : ""}`}>
+        <div className="text-5xl mb-3">🌿</div>
+        <h1 className="text-2xl font-bold text-stone-800 mb-1">Meadow</h1>
+        <p className="text-sm text-stone-400 mb-6">Tuotannon hallinta</p>
+        <Inp type="password" value={pin} onChange={setPin} placeholder="PIN" big
+          onKeyDown={e => e.key === "Enter" && tryLogin()} autoFocus />
+        <Btn onClick={tryLogin} full color="emerald" className="mt-4 text-lg">Kirjaudu</Btn>
       </div>
-    );
-  }
-
-  return <MainApp />;
+    </div>
+  );
 }
 
-function MainApp() {
-  const { ingredients, productions, orders, settings, loading, error, refetch } = useSupabaseData();
-  const [view, setView] = useState("dashboard");
-  const [toast, setToast] = useState(null);
-  const [modal, setModal] = useState(null);
+// ─── MAIN APP ────────────────────────────────
+export default function App() {
+  const [authed, setAuthed] = useState(sessionStorage.getItem("meadow-auth") === "1");
+  if (!authed) return <PinScreen onAuth={() => setAuthed(true)} />;
+  return <Main />;
+}
 
-  const showToast = (msg, type = "success") => {
-    setToast({ msg, type });
-    setTimeout(() => setToast(null), 3000);
+function Main() {
+  const data = useData();
+  const [view, setView] = useState("dashboard");
+  const [modal, setModal] = useState(null);
+  const [toast, setToast] = useState(null);
+
+  const show = (msg) => { setToast(msg); setTimeout(() => setToast(null), 2500); };
+
+  if (data.loading) return (
+    <div className="min-h-screen bg-stone-50 flex items-center justify-center">
+      <div className="text-4xl animate-pulse">🌿</div>
+    </div>
+  );
+
+  const { products, ingredients, recipeItems, productions, orders, settings, refetch } = data;
+  const activeProducts = products.filter(p => p.active);
+  const safetyDays = settings.safety_weeks * 7;
+
+  // ─── CALCULATIONS ────────────────────────
+  // Total daily consumption per ingredient across all products
+  const ingDailyUse = (ingId) => {
+    let total = 0;
+    for (const p of activeProducts) {
+      const ri = recipeItems.find(r => r.product_id === p.id && r.ingredient_id === ingId);
+      if (ri && p.weekly_rate > 0) total += (p.weekly_rate / 7) * ri.amount_per_jar;
+    }
+    return total;
   };
 
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-stone-50 flex items-center justify-center">
-        <div className="text-center">
-          <div className="text-4xl mb-3 animate-pulse">🌿</div>
-          <div className="text-stone-400">Ladataan...</div>
-        </div>
-      </div>
-    );
-  }
-
-  // Calculations
-  const dailyRate = settings.weekly_rate / 7;
-  const weeksLeft = settings.weekly_rate > 0 ? settings.jars_in_warehouse / settings.weekly_rate : 999;
-  const totalProduced = productions.reduce((s, p) => s + p.jars, 0);
-  const minJars = ingredients.length > 0
-    ? Math.min(...ingredients.map(i => i.per_jar > 0 ? Math.floor(i.stock / i.per_jar) : 999))
-    : 0;
-
-  const getStatus = (ing) => {
-    if (dailyRate === 0) return { label: "OK", color: "emerald", daysLeft: 999 };
-    const daysLeft = ing.stock / (dailyRate * ing.per_jar);
-    const threshold = ing.lead_days + settings.safety_weeks * 7;
+  const getIngStatus = (ing) => {
+    const daily = ingDailyUse(ing.id);
+    if (daily === 0) return { label: "OK", color: "emerald", daysLeft: 999 };
+    const daysLeft = ing.stock / daily;
+    const threshold = ing.lead_days + safetyDays;
     if (daysLeft <= threshold) return { label: "TILAA NYT", color: "red", daysLeft };
     if (daysLeft <= threshold + 7) return { label: "TILAA PIAN", color: "amber", daysLeft };
     return { label: "OK", color: "emerald", daysLeft };
   };
 
-  const suggestOrder = (ing) => Math.max(ing.min_order, Math.ceil(settings.weekly_rate * ing.per_jar * 4 / 10) * 10);
+  const suggestOrder = (ing) => {
+    const weeklyUse = ingDailyUse(ing.id) * 7;
+    return Math.max(ing.min_order, Math.ceil(weeklyUse * 4 / 10) * 10);
+  };
 
-  const urgentCount = ingredients.filter(i => getStatus(i).color === "red").length;
-  const soonCount = ingredients.filter(i => getStatus(i).color === "amber").length;
-  const openOrders = orders.filter(o => !o.delivered_at).length;
+  // Unit cost per jar for a product
+  const unitCost = (productId) => {
+    const items = recipeItems.filter(r => r.product_id === productId);
+    return items.reduce((sum, ri) => {
+      const ing = ingredients.find(i => i.id === ri.ingredient_id);
+      return sum + (ri.amount_per_jar * (ing?.price_per_unit || 0));
+    }, 0);
+  };
+
+  // Jars producible from current stock for a product
+  const jarsFromStock = (productId) => {
+    const items = recipeItems.filter(r => r.product_id === productId);
+    if (items.length === 0) return 0;
+    return Math.min(...items.map(ri => {
+      const ing = ingredients.find(i => i.id === ri.ingredient_id);
+      if (!ing || ri.amount_per_jar === 0) return 999999;
+      return Math.floor(ing.stock / ri.amount_per_jar);
+    }));
+  };
+
+  // Production target: jars needed this week vs produced this week
+  const weekStart = new Date(); weekStart.setDate(weekStart.getDate() - weekStart.getDay() + 1);
+  const weekStartStr = weekStart.toISOString().split("T")[0];
+  const prodThisWeek = (productId) => productions
+    .filter(p => p.product_id === productId && p.production_date >= weekStartStr)
+    .reduce((s, p) => s + p.jars, 0);
+
+  const urgentIngs = ingredients.filter(i => getIngStatus(i).color === "red");
+  const soonIngs = ingredients.filter(i => getIngStatus(i).color === "amber");
+  const openOrders = orders.filter(o => !o.delivered_at);
+  const totalProduced = productions.reduce((s, p) => s + p.jars, 0);
 
   // ─── ACTIONS ─────────────────────────────
-  const logProduction = async (jars, maker) => {
-    if (!jars || jars <= 0) return;
-
-    // Insert production record
-    const consumed = RECIPE.map(r => jars * r.perJar);
-    await supabase.from("productions").insert({
-      production_date: today(), jars, maker: maker || "–",
-      consumed: JSON.stringify(consumed)
+  const logProduction = async (productId, jars, maker, notes) => {
+    const items = recipeItems.filter(r => r.product_id === productId);
+    const consumed = items.map(ri => {
+      const ing = ingredients.find(i => i.id === ri.ingredient_id);
+      return { ingredient_id: ri.ingredient_id, name: ing?.name, amount: jars * ri.amount_per_jar, unit: ing?.unit };
     });
 
-    // Update ingredient stocks
-    for (let i = 0; i < ingredients.length; i++) {
-      const newStock = Math.max(0, ingredients[i].stock - consumed[i]);
-      await supabase.from("ingredients").update({ stock: newStock }).eq("id", ingredients[i].id);
-    }
+    await supabase.from("productions").insert({
+      product_id: productId, production_date: today(), jars, maker, notes, consumed: JSON.stringify(consumed)
+    });
 
-    showToast(`✅ ${jars} purkkia kirjattu!`);
+    for (const c of consumed) {
+      const ing = ingredients.find(i => i.id === c.ingredient_id);
+      if (ing) await supabase.from("ingredients").update({ stock: Math.max(0, ing.stock - c.amount) }).eq("id", ing.id);
+    }
+    show(`✅ ${jars} purkkia kirjattu!`);
     refetch();
   };
 
-  const placeOrder = async (ingredientId, amount, price) => {
+  const placeOrder = async (ingredientId, amount, price, notes) => {
     const ing = ingredients.find(i => i.id === ingredientId);
-    if (!ing || !amount) return;
-
+    if (!ing) return;
     await supabase.from("orders").insert({
-      order_date: today(), ingredient_name: ing.name, ingredient_id: ing.id,
-      supplier: ing.supplier, amount, unit: ing.unit, price: price || 0,
+      ingredient_id: ing.id, ingredient_name: ing.name, supplier: ing.supplier,
+      amount, unit: ing.unit, price, order_date: today(), notes,
       estimated_delivery: new Date(Date.now() + ing.lead_days * 86400000).toISOString().split("T")[0],
     });
-
-    showToast(`📦 Tilaus kirjattu: ${fmt(amount)} ${ing.unit} ${ing.name}`);
+    show(`📦 Tilaus: ${fmt(amount)} ${ing.unit} ${ing.name}`);
     refetch();
   };
 
   const receiveOrder = async (orderId) => {
     const order = orders.find(o => o.id === orderId);
     if (!order) return;
-
     await supabase.from("orders").update({ delivered_at: today() }).eq("id", orderId);
-
-    // Add stock
     const ing = ingredients.find(i => i.id === order.ingredient_id);
-    if (ing) {
-      await supabase.from("ingredients").update({ stock: ing.stock + order.amount }).eq("id", ing.id);
-    }
-
-    showToast(`✅ ${order.ingredient_name} vastaanotettu!`);
+    if (ing) await supabase.from("ingredients").update({ stock: ing.stock + order.amount }).eq("id", ing.id);
+    show(`✅ ${order.ingredient_name} vastaanotettu!`);
     refetch();
   };
-
-  const updateStock = async (ingredientId, newStock) => {
-    await supabase.from("ingredients").update({ stock: parseFloat(newStock) || 0 }).eq("id", ingredientId);
-    showToast("Saldo päivitetty");
-    refetch();
-  };
-
-  const updateSettings = async (updates) => {
-    await supabase.from("settings").update(updates).eq("id", settings.id);
-    refetch();
-  };
-
-  // ─── COMPONENTS ──────────────────────────
-  const NavBtn = ({ id, icon, label, badge }) => (
-    <button onClick={() => setView(id)}
-      className={`flex flex-col items-center gap-0.5 px-2 py-2 rounded-xl text-xs font-medium transition-all relative
-        ${view === id ? "bg-emerald-100 text-emerald-800" : "text-stone-500 hover:bg-stone-100"}`}>
-      <span className="text-lg">{icon}</span>
-      <span className="text-[10px]">{label}</span>
-      {badge > 0 && <span className="absolute -top-0.5 -right-0.5 bg-red-500 text-white text-[10px] w-4 h-4 rounded-full flex items-center justify-center font-bold">{badge}</span>}
-    </button>
-  );
-
-  const StatusBadge = ({ status }) => {
-    const c = { red: "bg-red-100 text-red-700 border-red-200", amber: "bg-amber-100 text-amber-700 border-amber-200", emerald: "bg-emerald-100 text-emerald-700 border-emerald-200" };
-    return <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${c[status.color]}`}>{status.label}</span>;
-  };
-
-  const Metric = ({ label, value, sub, alert }) => (
-    <div className={`rounded-2xl p-4 ${alert === "red" ? "bg-red-50 border-2 border-red-200" : alert === "amber" ? "bg-amber-50 border-2 border-amber-200" : "bg-white border border-stone-200"}`}>
-      <div className="text-[11px] text-stone-500 mb-1">{label}</div>
-      <div className={`text-xl font-bold ${alert === "red" ? "text-red-600" : alert === "amber" ? "text-amber-600" : "text-stone-800"}`}>{value}</div>
-      {sub && <div className="text-[11px] text-stone-400 mt-0.5">{sub}</div>}
-    </div>
-  );
 
   // ─── MODALS ──────────────────────────────
   const ProductionModal = () => {
+    const [pid, setPid] = useState(activeProducts[0]?.id || 0);
     const [jars, setJars] = useState("");
     const [maker, setMaker] = useState("");
+    const [notes, setNotes] = useState("");
     const j = parseInt(jars) || 0;
+    const items = recipeItems.filter(r => r.product_id === pid);
+    const prod = products.find(p => p.id === pid);
     return (
-      <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-30 animate-fade-in" onClick={() => setModal(null)}>
-        <div className="bg-white rounded-t-3xl sm:rounded-3xl p-6 w-full max-w-md animate-slide-up" onClick={e => e.stopPropagation()}>
-          <h3 className="text-xl font-bold mb-4">🏭 Kirjaa tuotanto</h3>
-          <label className="text-sm text-stone-500">Montako purkkia valmistettiin?</label>
-          <input type="number" inputMode="numeric" value={jars} onChange={e => setJars(e.target.value)} autoFocus
-            className="w-full border-2 border-stone-200 rounded-2xl px-4 py-4 text-3xl font-bold text-center mt-1 focus:border-emerald-500 focus:outline-none" placeholder="0" />
-          <label className="text-sm text-stone-500 mt-3 block">Valmistaja</label>
-          <input type="text" value={maker} onChange={e => setMaker(e.target.value)}
-            className="w-full border border-stone-200 rounded-xl px-4 py-3 mt-1" placeholder="Nimi" />
-          {j > 0 && (
-            <div className="mt-3 bg-stone-50 rounded-xl p-3 text-xs text-stone-500 space-y-1">
-              <div className="font-medium text-stone-700 mb-1">Kuluttaa raaka-aineita:</div>
-              {RECIPE.map((r, i) => {
-                const need = j * r.perJar;
-                const ing = ingredients[i];
-                const enough = ing && ing.stock >= need;
-                return (
-                  <div key={i} className={`flex justify-between ${!enough ? "text-red-600 font-bold" : ""}`}>
-                    <span>{r.name}</span>
-                    <span>{fmtDec(need)} {r.unit} {!enough ? "⚠️ EI RIITÄ" : ""}</span>
-                  </div>
-                );
-              })}
+      <Modal onClose={() => setModal(null)}>
+        <h3 className="text-xl font-bold mb-4">🏭 Kirjaa tuotanto</h3>
+        {activeProducts.length > 1 && (
+          <Field label="Tuote">
+            <select value={pid} onChange={e => setPid(Number(e.target.value))} className="w-full border border-stone-200 rounded-xl px-3 py-2.5 bg-white">
+              {activeProducts.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          </Field>
+        )}
+        <Field label="Montako purkkia valmistettiin?">
+          <Inp type="number" value={jars} onChange={setJars} placeholder="0" big autoFocus />
+        </Field>
+        <Field label="Valmistaja"><Inp value={maker} onChange={setMaker} placeholder="Nimi" /></Field>
+        <Field label="Muistiinpanot (vapaaehtoinen)"><Inp value={notes} onChange={setNotes} placeholder="Esim. erän laatu, huomiot..." /></Field>
+        {j > 0 && (
+          <div className="bg-stone-50 rounded-xl p-3 text-xs mb-3 space-y-1">
+            <div className="font-medium text-stone-700">Kuluttaa raaka-aineita:</div>
+            {items.map(ri => {
+              const ing = ingredients.find(i => i.id === ri.ingredient_id);
+              const need = j * ri.amount_per_jar;
+              const ok = ing && ing.stock >= need;
+              return <div key={ri.id} className={`flex justify-between ${!ok ? "text-red-600 font-bold" : "text-stone-500"}`}>
+                <span>{ing?.name}</span><span>{fmtDec(need)} {ing?.unit} {!ok ? "⚠️" : ""}</span>
+              </div>;
+            })}
+            <div className="border-t border-stone-200 pt-1 mt-1 flex justify-between font-bold text-stone-700">
+              <span>Raaka-ainekustannus</span><span>{fmtEur(j * unitCost(pid))}</span>
             </div>
-          )}
-          <div className="flex gap-2 mt-4">
-            <button onClick={() => setModal(null)} className="flex-1 py-3 rounded-xl border border-stone-300 text-stone-600 font-medium">Peruuta</button>
-            <button onClick={() => { logProduction(j, maker); setModal(null); }} disabled={j <= 0}
-              className="flex-1 py-3 rounded-xl bg-emerald-600 text-white font-bold disabled:opacity-30">
-              Kirjaa {j} purkkia ✓
-            </button>
           </div>
+        )}
+        <div className="flex gap-2">
+          <BtnOutline onClick={() => setModal(null)} full>Peruuta</BtnOutline>
+          <Btn onClick={() => { logProduction(pid, j, maker, notes); setModal(null); }} disabled={j <= 0} full>Kirjaa {j} purkkia ✓</Btn>
         </div>
-      </div>
+      </Modal>
     );
   };
 
-  const OrderModal = ({ prefillIngredient }) => {
-    const [ingIdx, setIngIdx] = useState(prefillIngredient ?? 0);
-    const [amount, setAmount] = useState(prefillIngredient != null ? String(suggestOrder(ingredients[prefillIngredient])) : "");
+  const OrderModal = ({ prefillIngId }) => {
+    const [ingId, setIngId] = useState(prefillIngId || ingredients[0]?.id);
+    const [amount, setAmount] = useState(prefillIngId ? String(suggestOrder(ingredients.find(i => i.id === prefillIngId))) : "");
     const [price, setPrice] = useState("");
-    const ing = ingredients[ingIdx];
+    const [notes, setNotes] = useState("");
+    const ing = ingredients.find(i => i.id === ingId);
     return (
-      <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-30 animate-fade-in" onClick={() => setModal(null)}>
-        <div className="bg-white rounded-t-3xl sm:rounded-3xl p-6 w-full max-w-md animate-slide-up" onClick={e => e.stopPropagation()}>
-          <h3 className="text-xl font-bold mb-4">📦 Uusi tilaus</h3>
-          <label className="text-sm text-stone-500">Raaka-aine</label>
-          <select value={ingIdx} onChange={e => { setIngIdx(parseInt(e.target.value)); setAmount(String(suggestOrder(ingredients[parseInt(e.target.value)]))); }}
-            className="w-full border border-stone-200 rounded-xl px-4 py-3 mt-1 mb-3 bg-white">
-            {ingredients.map((ing, i) => <option key={i} value={i}>{ing.name} – {ing.supplier}</option>)}
+      <Modal onClose={() => setModal(null)}>
+        <h3 className="text-xl font-bold mb-4">📦 Uusi tilaus</h3>
+        <Field label="Raaka-aine">
+          <select value={ingId} onChange={e => { const id = Number(e.target.value); setIngId(id); setAmount(String(suggestOrder(ingredients.find(i => i.id === id)))); }}
+            className="w-full border border-stone-200 rounded-xl px-3 py-2.5 bg-white">
+            {ingredients.map(i => <option key={i.id} value={i.id}>{i.name} – {i.supplier}</option>)}
           </select>
-          <label className="text-sm text-stone-500">Määrä ({ing?.unit})</label>
-          <input type="number" inputMode="numeric" value={amount} onChange={e => setAmount(e.target.value)}
-            className="w-full border-2 border-stone-200 rounded-2xl px-4 py-3 text-xl font-bold text-center mt-1 focus:border-purple-500 focus:outline-none" />
-          <div className="text-xs text-stone-400 mt-1 mb-3">Min. tilaus: {fmt(ing?.min_order || 0)} · Toimitusaika: ~{ing?.lead_days} pv</div>
-          <label className="text-sm text-stone-500">Hinta € (vapaaehtoinen)</label>
-          <input type="number" value={price} onChange={e => setPrice(e.target.value)}
-            className="w-full border border-stone-200 rounded-xl px-4 py-3 mt-1 mb-4" placeholder="0.00" />
-          <div className="flex gap-2">
-            <button onClick={() => setModal(null)} className="flex-1 py-3 rounded-xl border border-stone-300 text-stone-600 font-medium">Peruuta</button>
-            <button onClick={() => { placeOrder(ing.id, parseFloat(amount), parseFloat(price)); setModal(null); }} disabled={!amount || parseFloat(amount) <= 0}
-              className="flex-1 py-3 rounded-xl bg-purple-600 text-white font-bold disabled:opacity-30">
-              Kirjaa tilaus ✓
-            </button>
-          </div>
+        </Field>
+        <Field label={`Määrä (${ing?.unit || ""})`}><Inp type="number" value={amount} onChange={setAmount} big /></Field>
+        <div className="text-xs text-stone-400 -mt-2 mb-3">Min. tilaus: {fmt(ing?.min_order || 0)} · Toimitusaika: ~{ing?.lead_days} pv</div>
+        <Field label="Hinta € (vapaaehtoinen)"><Inp type="number" value={price} onChange={setPrice} placeholder="0.00" /></Field>
+        <Field label="Muistiinpanot"><Inp value={notes} onChange={setNotes} placeholder="Esim. tilausnumero, huomiot..." /></Field>
+        <div className="flex gap-2">
+          <BtnOutline onClick={() => setModal(null)} full>Peruuta</BtnOutline>
+          <Btn onClick={() => { placeOrder(ingId, parseFloat(amount), parseFloat(price) || 0, notes); setModal(null); }} disabled={!amount || parseFloat(amount) <= 0} full color="purple">Kirjaa tilaus ✓</Btn>
         </div>
-      </div>
+      </Modal>
+    );
+  };
+
+  const EditIngredientModal = ({ ingredient }) => {
+    const isNew = !ingredient;
+    const [name, setName] = useState(ingredient?.name || "");
+    const [unit, setUnit] = useState(ingredient?.unit || "kpl");
+    const [supplier, setSupplier] = useState(ingredient?.supplier || "");
+    const [leadDays, setLeadDays] = useState(String(ingredient?.lead_days ?? 7));
+    const [minOrder, setMinOrder] = useState(String(ingredient?.min_order ?? 0));
+    const [pricePerUnit, setPricePerUnit] = useState(String(ingredient?.price_per_unit ?? 0));
+    const [stock, setStock] = useState(String(Math.round(ingredient?.stock ?? 0)));
+    const [color, setColor] = useState(ingredient?.color || "#82E0AA");
+    const [confirm, setConfirm] = useState(false);
+
+    const save = async () => {
+      const d = { name, unit, supplier, lead_days: parseInt(leadDays) || 7, min_order: parseFloat(minOrder) || 0,
+        price_per_unit: parseFloat(pricePerUnit) || 0, stock: parseFloat(stock) || 0, color };
+      if (isNew) await supabase.from("ingredients").insert(d);
+      else await supabase.from("ingredients").update(d).eq("id", ingredient.id);
+      show(isNew ? "✅ Raaka-aine lisätty!" : "✅ Päivitetty!");
+      refetch(); setModal(null);
+    };
+
+    const remove = async () => {
+      await supabase.from("recipe_items").delete().eq("ingredient_id", ingredient.id);
+      await supabase.from("ingredients").delete().eq("id", ingredient.id);
+      show("Poistettu"); refetch(); setModal(null);
+    };
+
+    return (
+      <Modal onClose={() => setModal(null)}>
+        <h3 className="text-xl font-bold mb-4">{isNew ? "➕ Uusi raaka-aine" : `✏️ ${ingredient.name}`}</h3>
+        <Field label="Nimi"><Inp value={name} onChange={setName} placeholder="Esim. Tarra, Purkki..." /></Field>
+        <div className="grid grid-cols-2 gap-2">
+          <Field label="Yksikkö"><select value={unit} onChange={e => setUnit(e.target.value)} className="w-full border border-stone-200 rounded-xl px-3 py-2.5 bg-white">
+            {["g","ml","kpl","kg","l"].map(u => <option key={u} value={u}>{u}</option>)}
+          </select></Field>
+          <Field label="Väri"><input type="color" value={color} onChange={e => setColor(e.target.value)} className="w-full h-10 rounded-xl border border-stone-200 cursor-pointer" /></Field>
+        </div>
+        <Field label="Toimittaja"><Inp value={supplier} onChange={setSupplier} placeholder="Toimittajan nimi" /></Field>
+        <div className="grid grid-cols-3 gap-2">
+          <Field label="Toimitusaika (pv)"><Inp type="number" value={leadDays} onChange={setLeadDays} /></Field>
+          <Field label="Min. tilaus"><Inp type="number" value={minOrder} onChange={setMinOrder} /></Field>
+          <Field label="Hinta/yks €"><Inp type="number" value={pricePerUnit} onChange={setPricePerUnit} /></Field>
+        </div>
+        <Field label={`Nykyinen saldo (${unit})`}><Inp type="number" value={stock} onChange={setStock} big /></Field>
+        <div className="flex gap-2 mt-2">
+          <BtnOutline onClick={() => setModal(null)} full>Peruuta</BtnOutline>
+          <Btn onClick={save} disabled={!name} full>{isNew ? "Lisää" : "Tallenna"} ✓</Btn>
+        </div>
+        {!isNew && (
+          <div className="mt-4 pt-3 border-t border-stone-200">
+            {!confirm ? (
+              <button onClick={() => setConfirm(true)} className="text-sm text-red-500 w-full text-center">Poista raaka-aine...</button>
+            ) : (
+              <div className="flex gap-2">
+                <BtnOutline onClick={() => setConfirm(false)} full>Peruuta</BtnOutline>
+                <Btn onClick={remove} full color="red">Poista pysyvästi</Btn>
+              </div>
+            )}
+          </div>
+        )}
+      </Modal>
+    );
+  };
+
+  const EditProductModal = ({ product }) => {
+    const isNew = !product;
+    const [name, setName] = useState(product?.name || "");
+    const [jarSize, setJarSize] = useState(String(product?.jar_size ?? 60));
+    const [weeklyRate, setWeeklyRate] = useState(String(product?.weekly_rate ?? 0));
+    const [jarsWh, setJarsWh] = useState(String(product?.jars_in_warehouse ?? 0));
+    const [color, setColor] = useState(product?.color || "#059669");
+    const [confirm, setConfirm] = useState(false);
+
+    const save = async () => {
+      const d = { name, jar_size: parseFloat(jarSize) || 60, weekly_rate: parseInt(weeklyRate) || 0,
+        jars_in_warehouse: parseInt(jarsWh) || 0, color, active: true };
+      if (isNew) await supabase.from("products").insert(d);
+      else await supabase.from("products").update(d).eq("id", product.id);
+      show(isNew ? "✅ Tuote lisätty!" : "✅ Päivitetty!");
+      refetch(); setModal(null);
+    };
+
+    const remove = async () => {
+      await supabase.from("recipe_items").delete().eq("product_id", product.id);
+      await supabase.from("products").update({ active: false }).eq("id", product.id);
+      show("Tuote arkistoitu"); refetch(); setModal(null);
+    };
+
+    return (
+      <Modal onClose={() => setModal(null)}>
+        <h3 className="text-xl font-bold mb-4">{isNew ? "➕ Uusi tuote" : `✏️ ${product.name}`}</h3>
+        <Field label="Tuotteen nimi"><Inp value={name} onChange={setName} placeholder="Esim. Silky Sage" /></Field>
+        <div className="grid grid-cols-2 gap-2">
+          <Field label="Purkin koko (g)"><Inp type="number" value={jarSize} onChange={setJarSize} /></Field>
+          <Field label="Väri"><input type="color" value={color} onChange={e => setColor(e.target.value)} className="w-full h-10 rounded-xl border border-stone-200 cursor-pointer" /></Field>
+        </div>
+        <Field label="Myyntivauhti (purkkia/viikko)"><Inp type="number" value={weeklyRate} onChange={setWeeklyRate} big /></Field>
+        <Field label="3PL-varastosaldo (purkit)"><Inp type="number" value={jarsWh} onChange={setJarsWh} /></Field>
+        <div className="flex gap-2 mt-2">
+          <BtnOutline onClick={() => setModal(null)} full>Peruuta</BtnOutline>
+          <Btn onClick={save} disabled={!name} full>{isNew ? "Lisää" : "Tallenna"} ✓</Btn>
+        </div>
+        {!isNew && (
+          <div className="mt-4 pt-3 border-t border-stone-200">
+            {!confirm ? (
+              <button onClick={() => setConfirm(true)} className="text-sm text-red-500 w-full text-center">Arkistoi tuote...</button>
+            ) : (
+              <div className="flex gap-2"><BtnOutline onClick={() => setConfirm(false)} full>Peruuta</BtnOutline><Btn onClick={remove} full color="red">Arkistoi</Btn></div>
+            )}
+          </div>
+        )}
+      </Modal>
+    );
+  };
+
+  const RecipeModal = ({ product }) => {
+    const items = recipeItems.filter(r => r.product_id === product.id);
+    const [adding, setAdding] = useState(false);
+    const [newIngId, setNewIngId] = useState(ingredients[0]?.id);
+    const [newAmount, setNewAmount] = useState("");
+
+    const addItem = async () => {
+      await supabase.from("recipe_items").insert({ product_id: product.id, ingredient_id: newIngId, amount_per_jar: parseFloat(newAmount) || 0 });
+      setAdding(false); setNewAmount(""); refetch();
+    };
+
+    const updateItem = async (id, amount) => {
+      await supabase.from("recipe_items").update({ amount_per_jar: parseFloat(amount) || 0 }).eq("id", id);
+      refetch();
+    };
+
+    const removeItem = async (id) => {
+      await supabase.from("recipe_items").delete().eq("id", id);
+      refetch();
+    };
+
+    const usedIngIds = items.map(i => i.ingredient_id);
+    const availableIngs = ingredients.filter(i => !usedIngIds.includes(i.id));
+
+    return (
+      <Modal onClose={() => setModal(null)}>
+        <h3 className="text-xl font-bold mb-1">📋 Resepti: {product.name}</h3>
+        <p className="text-xs text-stone-400 mb-4">Muokkaa raaka-ainemääriä per purkki</p>
+        <div className="space-y-2 mb-3">
+          {items.map(ri => {
+            const ing = ingredients.find(i => i.id === ri.ingredient_id);
+            return (
+              <div key={ri.id} className="flex items-center gap-2 bg-stone-50 rounded-xl p-2.5">
+                <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: ing?.color }}></div>
+                <span className="flex-1 text-sm font-medium">{ing?.name}</span>
+                <input type="number" inputMode="decimal" defaultValue={ri.amount_per_jar}
+                  onBlur={e => updateItem(ri.id, e.target.value)}
+                  className="w-20 text-right border border-stone-200 rounded-lg px-2 py-1.5 text-sm font-bold focus:border-emerald-500 focus:outline-none" />
+                <span className="text-xs text-stone-400 w-6">{ing?.unit}</span>
+                <button onClick={() => removeItem(ri.id)} className="text-red-400 hover:text-red-600 text-lg px-1">×</button>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Totals */}
+        {items.length > 0 && (
+          <div className="bg-emerald-50 rounded-xl p-3 mb-3 text-sm">
+            <div className="flex justify-between"><span className="text-stone-600">Raaka-ainekustannus / purkki</span><span className="font-bold">{fmtEur(unitCost(product.id))}</span></div>
+            <div className="flex justify-between mt-1"><span className="text-stone-600">Valmistettavissa varastosta</span><span className="font-bold">{fmt(jarsFromStock(product.id))} purkkia</span></div>
+          </div>
+        )}
+
+        {/* Add ingredient */}
+        {adding ? (
+          <div className="border border-dashed border-stone-300 rounded-xl p-3 space-y-2">
+            <select value={newIngId} onChange={e => setNewIngId(Number(e.target.value))} className="w-full border border-stone-200 rounded-xl px-3 py-2 bg-white text-sm">
+              {availableIngs.map(i => <option key={i.id} value={i.id}>{i.name} ({i.unit})</option>)}
+            </select>
+            <Inp type="number" value={newAmount} onChange={setNewAmount} placeholder="Määrä per purkki" />
+            <div className="flex gap-2">
+              <BtnOutline onClick={() => setAdding(false)} full>Peruuta</BtnOutline>
+              <Btn onClick={addItem} disabled={!newAmount} full>Lisää ✓</Btn>
+            </div>
+          </div>
+        ) : (
+          availableIngs.length > 0 && <button onClick={() => { setNewIngId(availableIngs[0]?.id); setAdding(true); }}
+            className="w-full py-2.5 rounded-xl border-2 border-dashed border-stone-300 text-stone-400 font-medium text-sm hover:border-emerald-400 hover:text-emerald-600 transition-colors">
+            + Lisää raaka-aine reseptiin
+          </button>
+        )}
+        <Btn onClick={() => setModal(null)} full className="mt-3" color="stone">Valmis</Btn>
+      </Modal>
     );
   };
 
   const SettingsModal = () => {
-    const [wr, setWr] = useState(String(settings.weekly_rate));
     const [sw, setSw] = useState(String(settings.safety_weeks));
-    const [jw, setJw] = useState(String(settings.jars_in_warehouse));
+    const save = async () => {
+      await supabase.from("settings").update({ safety_weeks: parseInt(sw) || 3 }).eq("id", settings.id);
+      refetch(); setModal(null);
+    };
     return (
-      <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-30 animate-fade-in" onClick={() => setModal(null)}>
-        <div className="bg-white rounded-t-3xl sm:rounded-3xl p-6 w-full max-w-md animate-slide-up" onClick={e => e.stopPropagation()}>
-          <h3 className="text-xl font-bold mb-4">⚙️ Asetukset</h3>
-          <label className="text-sm text-stone-500">Myyntivauhti (purkkia/viikko)</label>
-          <input type="number" inputMode="numeric" value={wr} onChange={e => setWr(e.target.value)}
-            className="w-full border border-stone-200 rounded-xl px-4 py-3 mt-1 mb-3 text-lg font-bold" />
-          <label className="text-sm text-stone-500">Turvavarasto (viikkoja)</label>
-          <input type="number" inputMode="numeric" value={sw} onChange={e => setSw(e.target.value)}
-            className="w-full border border-stone-200 rounded-xl px-4 py-3 mt-1 mb-3 text-lg font-bold" />
-          <label className="text-sm text-stone-500">Purkkeja 3PL-varastossa</label>
-          <input type="number" inputMode="numeric" value={jw} onChange={e => setJw(e.target.value)}
-            className="w-full border border-stone-200 rounded-xl px-4 py-3 mt-1 mb-4 text-lg font-bold" />
-          <div className="flex gap-2">
-            <button onClick={() => setModal(null)} className="flex-1 py-3 rounded-xl border border-stone-300 text-stone-600 font-medium">Peruuta</button>
-            <button onClick={() => { updateSettings({ weekly_rate: parseInt(wr) || 70, safety_weeks: parseInt(sw) || 3, jars_in_warehouse: parseInt(jw) || 0 }); setModal(null); }}
-              className="flex-1 py-3 rounded-xl bg-stone-800 text-white font-bold">Tallenna ✓</button>
-          </div>
-        </div>
-      </div>
+      <Modal onClose={() => setModal(null)}>
+        <h3 className="text-xl font-bold mb-4">⚙️ Yleiset asetukset</h3>
+        <Field label="Turvavarasto (viikkoja)">
+          <Inp type="number" value={sw} onChange={setSw} big />
+          <p className="text-xs text-stone-400 mt-1">Montako viikkoa puskuria haluat raaka-aineisiin</p>
+        </Field>
+        <div className="flex gap-2"><BtnOutline onClick={() => setModal(null)} full>Peruuta</BtnOutline><Btn onClick={save} full>Tallenna ✓</Btn></div>
+      </Modal>
     );
   };
 
-  const StockEditModal = ({ ingredient, index }) => {
-    const [val, setVal] = useState(String(Math.round(ingredient.stock)));
-    return (
-      <div className="fixed inset-0 bg-black/40 flex items-end sm:items-center justify-center z-30 animate-fade-in" onClick={() => setModal(null)}>
-        <div className="bg-white rounded-t-3xl sm:rounded-3xl p-6 w-full max-w-md animate-slide-up" onClick={e => e.stopPropagation()}>
-          <h3 className="text-xl font-bold mb-2">{ingredient.name}</h3>
-          <p className="text-sm text-stone-400 mb-4">Korjaa saldo manuaalisesti</p>
-          <label className="text-sm text-stone-500">Uusi saldo ({ingredient.unit})</label>
-          <input type="number" inputMode="numeric" value={val} onChange={e => setVal(e.target.value)} autoFocus
-            className="w-full border-2 border-stone-200 rounded-2xl px-4 py-4 text-2xl font-bold text-center mt-1 focus:border-emerald-500 focus:outline-none" />
-          <div className="flex gap-2 mt-4">
-            <button onClick={() => setModal(null)} className="flex-1 py-3 rounded-xl border border-stone-300 text-stone-600 font-medium">Peruuta</button>
-            <button onClick={() => { updateStock(ingredient.id, val); setModal(null); }}
-              className="flex-1 py-3 rounded-xl bg-emerald-600 text-white font-bold">Tallenna ✓</button>
-          </div>
-          {getStatus(ingredient).color !== "emerald" && (
-            <button onClick={() => { setModal({ type: "order", prefill: index }); }}
-              className="w-full mt-3 py-3 rounded-xl bg-red-600 text-white font-bold">
-              Tilaa {fmt(suggestOrder(ingredient))} {ingredient.unit} →
-            </button>
-          )}
-        </div>
+  // ─── NAV ─────────────────────────────────
+  const Nav = () => (
+    <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-stone-200 px-1 py-1 z-20 safe-b">
+      <div className="max-w-lg mx-auto flex justify-around">
+        {[
+          { id: "dashboard", icon: "🏠", label: "Etusivu", badge: urgentIngs.length },
+          { id: "ingredients", icon: "📦", label: "Aineet", badge: urgentIngs.length + soonIngs.length },
+          { id: "products", icon: "🧴", label: "Tuotteet" },
+          { id: "orders", icon: "🚚", label: "Tilaukset", badge: openOrders.length },
+          { id: "history", icon: "📋", label: "Historia" },
+        ].map(t => (
+          <button key={t.id} onClick={() => setView(t.id)}
+            className={`flex flex-col items-center gap-0.5 px-2 py-1.5 rounded-xl text-[10px] font-medium relative transition-all
+              ${view === t.id ? "bg-emerald-100 text-emerald-800" : "text-stone-500"}`}>
+            <span className="text-base">{t.icon}</span><span>{t.label}</span>
+            {t.badge > 0 && <span className="absolute -top-0.5 -right-0.5 bg-red-500 text-white text-[9px] w-4 h-4 rounded-full flex items-center justify-center font-bold">{t.badge}</span>}
+          </button>
+        ))}
       </div>
-    );
-  };
+    </div>
+  );
+
+  // ─── VIEWS ───────────────────────────────
+  const DashboardView = () => (
+    <div className="space-y-4 animate-fade-in">
+      {/* Alerts */}
+      {urgentIngs.length > 0 ? (
+        <div className="bg-red-50 border-2 border-red-200 rounded-2xl p-4 flex items-center gap-3 cursor-pointer active:scale-[0.98]" onClick={() => setView("ingredients")}>
+          <span className="text-3xl">🚨</span>
+          <div><div className="font-bold text-red-700">{urgentIngs.length} raaka-ainetta tilattava</div>
+          <div className="text-sm text-red-600">{urgentIngs.map(i => i.name).join(", ")}</div></div>
+        </div>
+      ) : soonIngs.length > 0 ? (
+        <div className="bg-amber-50 border-2 border-amber-200 rounded-2xl p-4 flex items-center gap-3 cursor-pointer" onClick={() => setView("ingredients")}>
+          <span className="text-3xl">⚠️</span>
+          <div><div className="font-bold text-amber-700">{soonIngs.length} raaka-ainetta loppumassa</div></div>
+        </div>
+      ) : (
+        <div className="bg-emerald-50 border-2 border-emerald-200 rounded-2xl p-4 flex items-center gap-3">
+          <span className="text-3xl">✅</span><div className="font-bold text-emerald-700">Kaikki kunnossa!</div>
+        </div>
+      )}
+
+      {/* Production targets per product */}
+      {activeProducts.map(p => {
+        const done = prodThisWeek(p.id);
+        const target = p.weekly_rate;
+        const pct = target > 0 ? Math.min(100, (done / target) * 100) : 0;
+        const whWeeks = p.weekly_rate > 0 ? p.jars_in_warehouse / p.weekly_rate : 999;
+        return (
+          <div key={p.id} className="bg-white rounded-2xl border border-stone-200 p-4">
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2">
+                <div className="w-3 h-3 rounded-full" style={{ backgroundColor: p.color }}></div>
+                <span className="font-bold">{p.name}</span>
+              </div>
+              <span className="text-xs text-stone-400">{fmtEur(unitCost(p.id))} / purkki</span>
+            </div>
+            <div className="grid grid-cols-3 gap-2 mb-3">
+              <div className="text-center"><div className="text-lg font-bold">{fmt(p.jars_in_warehouse)}</div><div className="text-[10px] text-stone-400">3PL varasto</div></div>
+              <div className="text-center"><div className="text-lg font-bold">{fmt(jarsFromStock(p.id))}</div><div className="text-[10px] text-stone-400">valmistettavissa</div></div>
+              <div className="text-center"><div className={`text-lg font-bold ${whWeeks < 2 ? "text-red-600" : whWeeks < 4 ? "text-amber-600" : "text-stone-800"}`}>{whWeeks < 999 ? fmtDec(whWeeks) : "–"}</div><div className="text-[10px] text-stone-400">viikkoa jäljellä</div></div>
+            </div>
+            {target > 0 && (
+              <div>
+                <div className="flex justify-between text-xs mb-1">
+                  <span className="text-stone-500">Viikkotavoite</span>
+                  <span className={`font-bold ${done >= target ? "text-emerald-600" : "text-stone-700"}`}>{done} / {target} purkkia</span>
+                </div>
+                <div className="w-full bg-stone-100 rounded-full h-2.5">
+                  <div className={`h-2.5 rounded-full transition-all ${done >= target ? "bg-emerald-500" : "bg-amber-500"}`} style={{ width: `${pct}%` }}></div>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      {/* Quick produce */}
+      <Btn onClick={() => setModal({ type: "production" })} full className="py-5 text-lg shadow-lg shadow-emerald-200">🏭 Kirjaa tuotanto</Btn>
+
+      {/* Recent */}
+      {productions.length > 0 && (
+        <div className="bg-white rounded-2xl border border-stone-200 p-4">
+          <h3 className="font-bold text-stone-700 text-sm mb-2">Viimeisimmät erät</h3>
+          {productions.slice(0, 5).map(p => {
+            const prod = products.find(pr => pr.id === p.product_id);
+            return (
+              <div key={p.id} className="flex justify-between py-2 border-b border-stone-100 last:border-0">
+                <div>
+                  <span className="font-bold">{p.jars}</span>
+                  <span className="text-stone-400 text-sm"> {prod?.name || "?"} · {p.maker}</span>
+                  {p.notes && <div className="text-xs text-stone-400 italic">"{p.notes}"</div>}
+                </div>
+                <span className="text-xs text-stone-400">{dateStr(p.production_date)}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+
+  const IngredientsView = () => (
+    <div className="space-y-3 animate-fade-in">
+      <div className="flex justify-between items-center">
+        <h2 className="text-lg font-bold">📦 Raaka-aineet</h2>
+        <button onClick={() => setModal({ type: "editIngredient" })} className="text-sm text-emerald-600 font-bold">+ Lisää</button>
+      </div>
+
+      {ingredients.map(ing => {
+        const status = getIngStatus(ing);
+        const maxD = ing.lead_days + safetyDays + 14;
+        const pct = Math.min(100, (status.daysLeft / maxD) * 100);
+        return (
+          <div key={ing.id} onClick={() => setModal({ type: "editIngredient", ingredient: ing })}
+            className={`bg-white rounded-2xl border p-4 cursor-pointer active:scale-[0.98] transition-all
+              ${status.color === "red" ? "border-red-300 shadow-md shadow-red-100" : status.color === "amber" ? "border-amber-300" : "border-stone-200"}`}>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: ing.color }}></div>
+                <div>
+                  <div className="font-bold text-stone-800">{ing.name}</div>
+                  <div className="text-[11px] text-stone-400">{ing.supplier || "Ei toimittajaa"} · {ing.lead_days} pv · {fmtEur(ing.price_per_unit)}/{ing.unit}</div>
+                </div>
+              </div>
+              <div className="text-right">
+                <div className="font-bold text-lg">{fmt(Math.round(ing.stock))}<span className="text-sm text-stone-400 font-normal ml-1">{ing.unit}</span></div>
+                <StatusBadge color={status.color} label={status.label} />
+              </div>
+            </div>
+            <div className="mt-2.5">
+              <div className="flex justify-between text-[11px] text-stone-400 mb-1">
+                <span>~{Math.round(status.daysLeft)} pv jäljellä</span>
+                <span>{ingDailyUse(ing.id) > 0 ? `kulutus ${fmtDec(ingDailyUse(ing.id) * 7)}/vko` : "ei kulutusta"}</span>
+              </div>
+              <div className="w-full bg-stone-100 rounded-full h-2">
+                <div className={`h-2 rounded-full ${status.color === "red" ? "bg-red-500" : status.color === "amber" ? "bg-amber-500" : "bg-emerald-500"}`} style={{ width: `${pct}%` }}></div>
+              </div>
+            </div>
+            {status.color !== "emerald" && (
+              <button onClick={e => { e.stopPropagation(); setModal({ type: "order", prefillIngId: ing.id }); }}
+                className="mt-2.5 w-full py-2 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm font-bold active:bg-red-100">
+                Tilaa {fmt(suggestOrder(ing))} {ing.unit} →
+              </button>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+
+  const ProductsView = () => (
+    <div className="space-y-3 animate-fade-in">
+      <div className="flex justify-between items-center">
+        <h2 className="text-lg font-bold">🧴 Tuotteet</h2>
+        <button onClick={() => setModal({ type: "editProduct" })} className="text-sm text-emerald-600 font-bold">+ Lisää</button>
+      </div>
+      <button onClick={() => setModal({ type: "settings" })} className="w-full bg-white rounded-2xl border border-stone-200 p-3 text-left text-sm text-stone-500 flex items-center justify-between">
+        <span>⚙️ Yleiset asetukset · Turvavarasto: {settings.safety_weeks} vko</span><span className="text-stone-300">→</span>
+      </button>
+
+      {activeProducts.map(p => {
+        const items = recipeItems.filter(r => r.product_id === p.id);
+        const cost = unitCost(p.id);
+        return (
+          <div key={p.id} className="bg-white rounded-2xl border border-stone-200 overflow-hidden">
+            <div className="p-4 cursor-pointer" onClick={() => setModal({ type: "editProduct", product: p })}>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-4 h-4 rounded-full" style={{ backgroundColor: p.color }}></div>
+                  <div>
+                    <div className="font-bold text-lg">{p.name}</div>
+                    <div className="text-xs text-stone-400">{p.jar_size}g · {p.weekly_rate} purkkia/vko · 3PL: {fmt(p.jars_in_warehouse)}</div>
+                  </div>
+                </div>
+                <span className="text-stone-300 text-lg">✏️</span>
+              </div>
+            </div>
+
+            {/* Recipe summary */}
+            <div className="border-t border-stone-100 px-4 py-3">
+              <div className="flex justify-between items-center mb-2">
+                <span className="text-xs font-bold text-stone-500">RESEPTI ({items.length} ainesosaa)</span>
+                <span className="text-sm font-bold text-emerald-700">{fmtEur(cost)} / purkki</span>
+              </div>
+              <div className="flex flex-wrap gap-1.5 mb-2">
+                {items.map(ri => {
+                  const ing = ingredients.find(i => i.id === ri.ingredient_id);
+                  return <span key={ri.id} className="text-[10px] bg-stone-100 px-2 py-1 rounded-lg">
+                    {ing?.name}: {fmtDec(ri.amount_per_jar)} {ing?.unit}
+                  </span>;
+                })}
+              </div>
+              <button onClick={() => setModal({ type: "recipe", product: p })}
+                className="w-full py-2 rounded-xl border border-dashed border-stone-300 text-stone-500 text-sm font-medium hover:border-emerald-400 hover:text-emerald-600 transition-colors">
+                Muokkaa reseptiä →
+              </button>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+
+  const OrdersView = () => (
+    <div className="space-y-4 animate-fade-in">
+      <div className="flex justify-between items-center">
+        <h2 className="text-lg font-bold">🚚 Tilaukset</h2>
+        <Btn onClick={() => setModal({ type: "order" })} color="purple" className="text-sm py-2">+ Uusi tilaus</Btn>
+      </div>
+
+      {openOrders.length > 0 && (
+        <div>
+          <h3 className="font-bold text-stone-500 text-sm mb-2">⏳ Avoimet ({openOrders.length})</h3>
+          {openOrders.map(o => (
+            <div key={o.id} className="bg-white rounded-2xl border border-stone-200 p-4 mb-2">
+              <div className="flex justify-between items-start">
+                <div className="flex-1">
+                  <div className="font-bold">{o.ingredient_name}</div>
+                  <div className="text-sm text-stone-500">{fmt(o.amount)} {o.unit} · {o.supplier}</div>
+                  <div className="text-xs text-stone-400">Tilattu {dateStr(o.order_date)} · Arvio {dateStr(o.estimated_delivery)}</div>
+                  {o.notes && <div className="text-xs text-stone-400 italic mt-1">"{o.notes}"</div>}
+                </div>
+                <Btn onClick={() => receiveOrder(o.id)} className="text-sm py-2 ml-2 whitespace-nowrap">Saapunut ✓</Btn>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {orders.filter(o => o.delivered_at).length > 0 && (
+        <div>
+          <h3 className="font-bold text-stone-500 text-sm mb-2">✅ Toimitetut</h3>
+          {orders.filter(o => o.delivered_at).slice(0, 15).map(o => (
+            <div key={o.id} className="bg-stone-50 rounded-xl p-3 mb-1.5 text-sm">
+              <div className="flex justify-between">
+                <span><span className="font-medium">{o.ingredient_name}</span><span className="text-stone-400"> · {fmt(o.amount)} {o.unit}</span></span>
+                <span className="text-stone-400 text-xs">{dateStr(o.delivered_at)}</span>
+              </div>
+              {o.notes && <div className="text-xs text-stone-400 italic">"{o.notes}"</div>}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {orders.length === 0 && <div className="text-center text-stone-400 py-12">Ei tilauksia vielä</div>}
+    </div>
+  );
+
+  const HistoryView = () => (
+    <div className="space-y-3 animate-fade-in">
+      <h2 className="text-lg font-bold">📋 Tuotantohistoria</h2>
+      {totalProduced > 0 && (
+        <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-4 text-center">
+          <div className="text-3xl font-bold text-emerald-700">{fmt(totalProduced)}</div>
+          <div className="text-sm text-emerald-600">purkkia yhteensä · {productions.length} erää</div>
+        </div>
+      )}
+      {productions.map(p => {
+        const prod = products.find(pr => pr.id === p.product_id);
+        let consumed = []; try { consumed = JSON.parse(p.consumed || "[]"); } catch {}
+        return (
+          <div key={p.id} className="bg-white rounded-2xl border border-stone-200 p-4">
+            <div className="flex justify-between items-center mb-1">
+              <div className="flex items-center gap-2">
+                {prod && <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: prod.color }}></div>}
+                <span className="text-lg font-bold">{p.jars} purkkia</span>
+                <span className="text-sm text-stone-400">{prod?.name}</span>
+              </div>
+              <span className="text-xs text-stone-400">{dateStr(p.production_date)}</span>
+            </div>
+            <div className="text-sm text-stone-500">Valmistaja: {p.maker}</div>
+            {p.notes && <div className="text-sm text-stone-400 italic mt-0.5">"{p.notes}"</div>}
+            <div className="flex flex-wrap gap-1.5 mt-2">
+              {consumed.map((c, i) => (
+                <span key={i} className="text-[10px] bg-stone-100 px-2 py-0.5 rounded-lg text-stone-500">{c.name}: {fmtDec(c.amount)} {c.unit}</span>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+      {productions.length === 0 && <div className="text-center text-stone-400 py-12">Ei tuotantoja vielä</div>}
+    </div>
+  );
 
   return (
     <div className="min-h-screen bg-stone-50">
-      {/* Toast */}
-      {toast && (
-        <div className={`fixed top-4 left-1/2 -translate-x-1/2 px-6 py-3 rounded-2xl shadow-lg z-40 animate-slide-up font-bold
-          ${toast.type === "success" ? "bg-emerald-600 text-white" : "bg-red-600 text-white"}`}>
-          {toast.msg}
-        </div>
-      )}
+      {toast && <div className="fixed top-4 left-1/2 -translate-x-1/2 px-6 py-3 rounded-2xl shadow-lg z-40 animate-slide-up bg-emerald-600 text-white font-bold">{toast}</div>}
 
-      {/* Error banner */}
-      {error && (
-        <div className="bg-red-50 border-b border-red-200 px-4 py-2 text-center text-sm text-red-600">{error}</div>
-      )}
-
-      {/* Modals */}
       {modal?.type === "production" && <ProductionModal />}
-      {modal?.type === "order" && <OrderModal prefillIngredient={modal.prefill} />}
+      {modal?.type === "order" && <OrderModal prefillIngId={modal.prefillIngId} />}
+      {modal?.type === "editIngredient" && <EditIngredientModal ingredient={modal.ingredient} />}
+      {modal?.type === "editProduct" && <EditProductModal product={modal.product} />}
+      {modal?.type === "recipe" && <RecipeModal product={modal.product} />}
       {modal?.type === "settings" && <SettingsModal />}
-      {modal?.type === "editStock" && <StockEditModal ingredient={modal.ingredient} index={modal.index} />}
 
       {/* Header */}
       <div className="bg-white border-b border-stone-200 px-4 py-3 sticky top-0 z-20">
         <div className="max-w-lg mx-auto flex items-center justify-between">
           <div>
             <h1 className="text-lg font-bold text-stone-800">🌿 Meadow</h1>
-            <p className="text-[11px] text-stone-400">Tuotannon hallinta{settings.weekly_rate ? ` · ${settings.weekly_rate} purkkia/vko` : ""}</p>
+            <p className="text-[11px] text-stone-400">{activeProducts.map(p => p.name).join(" · ")}</p>
           </div>
-          <button onClick={() => setModal({ type: "settings" })}
-            className="text-stone-400 hover:text-stone-600 p-2 rounded-lg hover:bg-stone-100 transition-colors">⚙️</button>
+          <button onClick={() => setModal({ type: "settings" })} className="text-stone-400 hover:text-stone-600 p-2 rounded-lg hover:bg-stone-100">⚙️</button>
         </div>
       </div>
 
-      <div className="max-w-lg mx-auto pb-24 px-4">
-
-        {/* ═══════ DASHBOARD ═══════ */}
-        {view === "dashboard" && (
-          <div className="mt-4 space-y-4 animate-fade-in">
-            {/* Alert */}
-            {urgentCount > 0 ? (
-              <div className="bg-red-50 border-2 border-red-200 rounded-2xl p-4 flex items-center gap-3 cursor-pointer active:scale-[0.98] transition-transform" onClick={() => setView("ingredients")}>
-                <span className="text-3xl">🚨</span>
-                <div>
-                  <div className="font-bold text-red-700">{urgentCount} raaka-ainetta tilattava</div>
-                  <div className="text-sm text-red-600">Napauta nähdäksesi →</div>
-                </div>
-              </div>
-            ) : soonCount > 0 ? (
-              <div className="bg-amber-50 border-2 border-amber-200 rounded-2xl p-4 flex items-center gap-3 cursor-pointer" onClick={() => setView("ingredients")}>
-                <span className="text-3xl">⚠️</span>
-                <div>
-                  <div className="font-bold text-amber-700">{soonCount} raaka-ainetta loppumassa</div>
-                  <div className="text-sm text-amber-600">Napauta →</div>
-                </div>
-              </div>
-            ) : (
-              <div className="bg-emerald-50 border-2 border-emerald-200 rounded-2xl p-4 flex items-center gap-3">
-                <span className="text-3xl">✅</span>
-                <div className="font-bold text-emerald-700">Kaikki kunnossa!</div>
-              </div>
-            )}
-
-            {/* Metrics */}
-            <div className="grid grid-cols-2 gap-3">
-              <Metric label="3PL varasto" value={`${fmt(settings.jars_in_warehouse)}`}
-                sub={weeksLeft < 999 ? `~${fmtDec(weeksLeft)} viikkoa` : "Aseta menekki"} alert={weeksLeft < 2 ? "red" : weeksLeft < 4 ? "amber" : null} />
-              <Metric label="Raaka-aineista riittää" value={`${fmt(minJars)} purkkia`}
-                alert={minJars < settings.weekly_rate ? "amber" : null} />
-              <Metric label="Viikkomenekki" value={`${fmt(settings.weekly_rate)}/vko`}
-                sub={`~${fmt(Math.round(settings.weekly_rate * 4.33))}/kk`} />
-              <Metric label="Tuotettu yhteensä" value={fmt(totalProduced)} sub={`${productions.length} erää`} />
-            </div>
-
-            {/* Quick produce button */}
-            <button onClick={() => setModal({ type: "production" })}
-              className="w-full py-5 rounded-2xl bg-emerald-600 text-white font-bold text-lg hover:bg-emerald-700 active:scale-[0.98] transition-all shadow-lg shadow-emerald-200">
-              🏭 Kirjaa tuotanto
-            </button>
-
-            {/* Recent */}
-            {productions.length > 0 && (
-              <div className="bg-white rounded-2xl border border-stone-200 p-4">
-                <h3 className="font-bold text-stone-700 text-sm mb-2">Viimeisimmät erät</h3>
-                {productions.slice(0, 5).map(p => (
-                  <div key={p.id} className="flex justify-between py-2 border-b border-stone-100 last:border-0">
-                    <span><span className="font-bold">{p.jars}</span> <span className="text-stone-400 text-sm">purkkia · {p.maker}</span></span>
-                    <span className="text-sm text-stone-400">{dateStr(p.production_date)}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* ═══════ INGREDIENTS ═══════ */}
-        {view === "ingredients" && (
-          <div className="mt-4 space-y-3 animate-fade-in">
-            <div className="flex justify-between items-center">
-              <h2 className="text-lg font-bold text-stone-800">📦 Raaka-aineet</h2>
-              <button onClick={() => setModal({ type: "order" })} className="text-sm text-purple-600 font-bold">+ Tilaus</button>
-            </div>
-
-            {ingredients.map((ing, idx) => {
-              const status = getStatus(ing);
-              const maxDays = ing.lead_days + settings.safety_weeks * 7 + 14;
-              const pct = Math.min(100, (status.daysLeft / maxDays) * 100);
-              return (
-                <div key={ing.id}
-                  onClick={() => setModal({ type: "editStock", ingredient: ing, index: idx })}
-                  className={`bg-white rounded-2xl border p-4 cursor-pointer active:scale-[0.98] transition-all
-                    ${status.color === "red" ? "border-red-300 shadow-md shadow-red-100" : status.color === "amber" ? "border-amber-300" : "border-stone-200"}`}>
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: ing.color }}></div>
-                      <div>
-                        <div className="font-bold text-stone-800">{ing.name}</div>
-                        <div className="text-[11px] text-stone-400">{ing.supplier} · {ing.lead_days} pv</div>
-                      </div>
-                    </div>
-                    <div className="text-right">
-                      <div className="font-bold text-lg">{fmt(Math.round(ing.stock))}<span className="text-sm text-stone-400 font-normal ml-1">{ing.unit}</span></div>
-                      <StatusBadge status={status} />
-                    </div>
-                  </div>
-                  <div className="mt-3">
-                    <div className="flex justify-between text-[11px] text-stone-400 mb-1">
-                      <span>~{Math.round(status.daysLeft)} pv · ~{fmt(Math.floor(ing.stock / ing.per_jar))} purkkia</span>
-                      <span>{fmtDec(ing.per_jar)} {ing.unit}/purkki</span>
-                    </div>
-                    <div className="w-full bg-stone-100 rounded-full h-2">
-                      <div className={`h-2 rounded-full transition-all ${status.color === "red" ? "bg-red-500" : status.color === "amber" ? "bg-amber-500" : "bg-emerald-500"}`}
-                        style={{ width: `${pct}%` }}></div>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-
-        {/* ═══════ ORDERS ═══════ */}
-        {view === "orders" && (
-          <div className="mt-4 space-y-4 animate-fade-in">
-            <div className="flex justify-between items-center">
-              <h2 className="text-lg font-bold text-stone-800">🚚 Tilaukset</h2>
-              <button onClick={() => setModal({ type: "order" })}
-                className="px-4 py-2 bg-purple-600 text-white rounded-xl text-sm font-bold">+ Uusi tilaus</button>
-            </div>
-
-            {/* Open orders */}
-            {orders.filter(o => !o.delivered_at).length > 0 && (
-              <div>
-                <h3 className="font-bold text-stone-500 text-sm mb-2">⏳ Avoimet ({orders.filter(o => !o.delivered_at).length})</h3>
-                {orders.filter(o => !o.delivered_at).map(o => (
-                  <div key={o.id} className="bg-white rounded-2xl border border-stone-200 p-4 mb-2">
-                    <div className="flex justify-between items-start">
-                      <div>
-                        <div className="font-bold">{o.ingredient_name}</div>
-                        <div className="text-sm text-stone-500">{fmt(o.amount)} {o.unit} · {o.supplier}</div>
-                        <div className="text-xs text-stone-400">Tilattu {dateStr(o.order_date)} · Arvio {dateStr(o.estimated_delivery)}</div>
-                      </div>
-                      <button onClick={() => receiveOrder(o.id)}
-                        className="px-3 py-2 bg-emerald-600 text-white rounded-xl text-sm font-bold whitespace-nowrap active:scale-95 transition-transform">
-                        Saapunut ✓
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* Delivered */}
-            {orders.filter(o => o.delivered_at).length > 0 && (
-              <div>
-                <h3 className="font-bold text-stone-500 text-sm mb-2">✅ Toimitetut</h3>
-                {orders.filter(o => o.delivered_at).slice(0, 10).map(o => (
-                  <div key={o.id} className="bg-stone-50 rounded-xl p-3 mb-2 text-sm">
-                    <span className="font-medium">{o.ingredient_name}</span>
-                    <span className="text-stone-400"> · {fmt(o.amount)} {o.unit} · {dateStr(o.delivered_at)}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {orders.length === 0 && (
-              <div className="text-center text-stone-400 py-12">Ei tilauksia vielä</div>
-            )}
-          </div>
-        )}
-
-        {/* ═══════ HISTORY ═══════ */}
-        {view === "history" && (
-          <div className="mt-4 space-y-3 animate-fade-in">
-            <h2 className="text-lg font-bold text-stone-800">📋 Tuotantohistoria</h2>
-            {totalProduced > 0 && (
-              <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-4 text-center">
-                <div className="text-3xl font-bold text-emerald-700">{fmt(totalProduced)}</div>
-                <div className="text-sm text-emerald-600">purkkia yhteensä · {productions.length} erää</div>
-              </div>
-            )}
-            {productions.map(p => {
-              let consumed = [];
-              try { consumed = JSON.parse(p.consumed || "[]"); } catch {}
-              return (
-                <div key={p.id} className="bg-white rounded-2xl border border-stone-200 p-4">
-                  <div className="flex justify-between items-center mb-1">
-                    <span className="text-xl font-bold">{p.jars} purkkia</span>
-                    <span className="text-sm text-stone-400">{dateStr(p.production_date)}</span>
-                  </div>
-                  <div className="text-sm text-stone-500 mb-2">Valmistaja: {p.maker}</div>
-                  <div className="flex flex-wrap gap-2">
-                    {RECIPE.map((r, i) => (
-                      <span key={i} className="text-[10px] bg-stone-100 px-2 py-1 rounded-lg text-stone-500">
-                        {r.name}: {fmtDec(consumed[i] || 0)} {r.unit}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              );
-            })}
-            {productions.length === 0 && (
-              <div className="text-center text-stone-400 py-12">Ei tuotantoja vielä</div>
-            )}
-          </div>
-        )}
-
-        {/* ═══════ RECIPE ═══════ */}
-        {view === "recipe" && (
-          <div className="mt-4 space-y-4 animate-fade-in">
-            <h2 className="text-lg font-bold text-stone-800">🧪 Resepti – Silky Sage 60g</h2>
-            <div className="bg-white rounded-2xl border border-stone-200 overflow-hidden">
-              {RECIPE.map((r, i) => (
-                <div key={i} className="flex items-center justify-between p-4 border-b border-stone-100 last:border-0">
-                  <div className="flex items-center gap-3">
-                    <div className="w-3 h-3 rounded-full" style={{ backgroundColor: r.color }}></div>
-                    <span className="font-medium">{r.name}</span>
-                  </div>
-                  <span className="font-bold">{fmtDec(r.perJar)} {r.unit}</span>
-                </div>
-              ))}
-              <div className="flex justify-between p-4 bg-stone-50 font-bold">
-                <span>Yhteensä</span>
-                <span>{fmtDec(RECIPE.reduce((s, r) => s + r.perJar, 0))} g</span>
-              </div>
-            </div>
-
-            <RecipeCalculator />
-          </div>
-        )}
+      <div className="max-w-lg mx-auto pb-20 px-4 mt-4">
+        {view === "dashboard" && <DashboardView />}
+        {view === "ingredients" && <IngredientsView />}
+        {view === "products" && <ProductsView />}
+        {view === "orders" && <OrdersView />}
+        {view === "history" && <HistoryView />}
       </div>
 
-      {/* Bottom nav */}
-      <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-stone-200 px-2 py-1 z-20 safe-area-bottom">
-        <div className="max-w-lg mx-auto flex justify-around">
-          <NavBtn id="dashboard" icon="🏠" label="Etusivu" badge={urgentCount} />
-          <NavBtn id="ingredients" icon="📦" label="Aineet" badge={urgentCount + soonCount} />
-          <NavBtn id="orders" icon="🚚" label="Tilaukset" badge={openOrders} />
-          <NavBtn id="history" icon="📋" label="Historia" />
-          <NavBtn id="recipe" icon="🧪" label="Resepti" />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function RecipeCalculator() {
-  const [jars, setJars] = useState("");
-  const j = parseInt(jars) || 0;
-  return (
-    <div className="bg-white rounded-2xl border border-stone-200 p-4">
-      <h3 className="font-bold mb-3">🔢 Raaka-ainelaskuri</h3>
-      <input type="number" inputMode="numeric" placeholder="Montako purkkia?" value={jars} onChange={e => setJars(e.target.value)}
-        className="w-full border-2 border-stone-200 rounded-xl px-4 py-3 text-xl font-bold text-center focus:border-emerald-500 focus:outline-none" />
-      {j > 0 && (
-        <div className="mt-3 space-y-2">
-          {RECIPE.map((r, i) => (
-            <div key={i} className="flex justify-between py-1 text-sm">
-              <span className="text-stone-600">{r.name}</span>
-              <span className="font-bold">{fmtDec(j * r.perJar)} {r.unit}</span>
-            </div>
-          ))}
-          <div className="flex justify-between py-2 border-t border-stone-200 font-bold">
-            <span>Kokonaispaino</span>
-            <span>{fmtDec(j * RECIPE.reduce((s, r) => s + r.perJar, 0))} g</span>
-          </div>
-        </div>
-      )}
+      <Nav />
     </div>
   );
 }
