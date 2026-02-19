@@ -1,0 +1,9 @@
+{
+  "name": "Meadow – Tuotannon hallinta",
+  "short_name": "Meadow",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#fafaf9",
+  "theme_color": "#059669",
+  "icons": []
+}
