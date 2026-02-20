@@ -63,6 +63,18 @@ const displayStock = (baseValue, baseUnit) => {
   return { text, unit, val };
 };
 
+// Smart price display: 0.005 €/g → "5,00 €/kg"
+const displayPrice = (basePricePerUnit, baseUnit) => {
+  const group = getGroup(baseUnit);
+  if (!group) return { text: fmtEur(basePricePerUnit), unit: baseUnit };
+  const sorted = Object.entries(group).sort((a, b) => b[1] - a[1]);
+  for (const [u, factor] of sorted) {
+    const p = basePricePerUnit * factor;
+    if (p >= 0.01 || u === baseUnit) return { text: fmtEur(p), unit: u };
+  }
+  return { text: fmtEur(basePricePerUnit), unit: baseUnit };
+};
+
 // Get sibling units for dropdown
 const getUnitFamily = (unit) => {
   const group = getGroup(unit);
@@ -430,6 +442,7 @@ function Main() {
     const [minOrder, setMinOrder] = useState("");
     const [minOrderUnit, setMinOrderUnit] = useState(ingredient?.unit || "g");
     const [pricePerUnit, setPricePerUnit] = useState(String(ingredient?.price_per_unit ?? 0));
+    const [priceUnit, setPriceUnit] = useState(ingredient?.unit || "g");
     const [stockVal, setStockVal] = useState("");
     const [stockUnit, setStockUnit] = useState(ingredient?.unit || "g");
     const [color, setColor] = useState(ingredient?.color || "#82E0AA");
@@ -443,6 +456,19 @@ function Main() {
         const md = smartDisplay(ingredient.min_order, ingredient.unit);
         setMinOrderUnit(md.unit);
         setMinOrder(String(Math.round(md.val)));
+        // Convert €/g → €/kg for display (multiply price by unit factor)
+        const group = getGroup(ingredient.unit);
+        if (group) {
+          const sorted = Object.entries(group).sort((a, b) => b[1] - a[1]);
+          for (const [u, factor] of sorted) {
+            const displayPrice = ingredient.price_per_unit * factor;
+            if (displayPrice >= 0.01 || u === ingredient.unit) {
+              setPricePerUnit(String(Math.round(displayPrice * 1000) / 1000));
+              setPriceUnit(u);
+              break;
+            }
+          }
+        }
       }
     }, []);
 
@@ -450,8 +476,12 @@ function Main() {
       const baseUnit = isNew ? getBaseUnit(unit) : ingredient.unit;
       const stockBase = toBase(parseFloat(stockVal) || 0, stockUnit);
       const minOrderBase = toBase(parseFloat(minOrder) || 0, minOrderUnit);
+      // Convert displayed price (€/kg) → base price (€/g): divide by unit factor
+      const priceGroup = getGroup(priceUnit);
+      const priceFactor = priceGroup?.[priceUnit] || 1;
+      const basePricePerUnit = (parseFloat(pricePerUnit) || 0) / priceFactor;
       const d = { name, unit: baseUnit, supplier, lead_days: parseInt(leadDays) || 7, min_order: minOrderBase,
-        price_per_unit: parseFloat(pricePerUnit) || 0, stock: stockBase, color };
+        price_per_unit: basePricePerUnit, stock: stockBase, color };
       if (isNew) await supabase.from("ingredients").insert(d);
       else await supabase.from("ingredients").update(d).eq("id", ingredient.id);
       show(isNew ? "✅ Raaka-aine lisätty!" : "✅ Päivitetty!");
@@ -473,7 +503,7 @@ function Main() {
         <div className="grid grid-cols-2 gap-2">
           <Field label="Perusyksikkö">
             {isNew ? (
-              <select value={unit} onChange={e => { setUnit(e.target.value); setStockUnit(e.target.value); setMinOrderUnit(e.target.value); }}
+              <select value={unit} onChange={e => { setUnit(e.target.value); setStockUnit(e.target.value); setMinOrderUnit(e.target.value); setPriceUnit(e.target.value); }}
                 className="w-full border border-stone-200 rounded-xl px-3 py-2.5 bg-white">
                 {["g","ml","kpl"].map(u => <option key={u} value={u}>{u} ({u === "g" ? "paino" : u === "ml" ? "tilavuus" : "lukumäärä"})</option>)}
               </select>
@@ -486,8 +516,24 @@ function Main() {
         <Field label="Toimittaja"><Inp value={supplier} onChange={setSupplier} placeholder="Toimittajan nimi" /></Field>
         <div className="grid grid-cols-2 gap-2">
           <Field label="Toimitusaika (pv)"><Inp type="number" value={leadDays} onChange={setLeadDays} /></Field>
-          <Field label={`Hinta € / ${currentBase}`}><Inp type="number" value={pricePerUnit} onChange={setPricePerUnit} placeholder="0.000" /></Field>
         </div>
+        <Field label="Hinta €">
+          <div className="flex gap-2 items-center">
+            <input type="number" inputMode="decimal" value={pricePerUnit} onChange={e => setPricePerUnit(e.target.value)}
+              placeholder="0.00" className="flex-1 border border-stone-200 rounded-xl px-3 py-2.5 focus:border-emerald-500 focus:outline-none" />
+            <span className="text-stone-500">€ /</span>
+            <select value={priceUnit} onChange={e => {
+              const newU = e.target.value;
+              const oldFactor = getGroup(priceUnit)?.[priceUnit] || 1;
+              const newFactor = getGroup(newU)?.[newU] || 1;
+              const converted = (parseFloat(pricePerUnit) || 0) * (newFactor / oldFactor);
+              setPricePerUnit(String(Math.round(converted * 1000) / 1000));
+              setPriceUnit(newU);
+            }} className="border border-stone-200 rounded-xl px-3 py-2.5 bg-white font-medium text-stone-700 min-w-[70px]">
+              {getUnitFamily(currentBase).map(u => <option key={u} value={u}>{u}</option>)}
+            </select>
+          </div>
+        </Field>
         <Field label="Minimitilaus">
           <InpWithUnit value={minOrder} onChange={setMinOrder} unit={minOrderUnit} onUnitChange={setMinOrderUnit} baseUnit={currentBase} />
         </Field>
@@ -596,8 +642,8 @@ function Main() {
         <div className="space-y-2 mb-3">
           {items.map(ri => {
             const ing = ingredients.find(i => i.id === ri.ingredient_id);
-            const baseU = ing?.unit || "g";
-            // For recipe, always show in base unit (g/ml) for precision
+            const baseU = getBaseUnit(ing?.unit || "g"); // Always g, ml, or kpl in recipe
+            const displayVal = fromBase(ri.amount_per_jar, ing?.unit || "g"); // Convert if stored unit differs
             return (
               <div key={ri.id} className="flex items-center gap-2 bg-stone-50 rounded-xl p-2.5">
                 <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: ing?.color }}></div>
@@ -859,7 +905,7 @@ function Main() {
                 <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: ing.color }}></div>
                 <div>
                   <div className="font-bold text-stone-800">{ing.name}</div>
-                  <div className="text-[11px] text-stone-400">{ing.supplier || "–"} · {ing.lead_days} pv · {fmtEur(ing.price_per_unit)}/{ing.unit}</div>
+                  <div className="text-[11px] text-stone-400">{ing.supplier || "–"} · {ing.lead_days} pv · {displayPrice(ing.price_per_unit, ing.unit).text}/{displayPrice(ing.price_per_unit, ing.unit).unit}</div>
                 </div>
               </div>
               <div className="text-right">
@@ -922,9 +968,9 @@ function Main() {
               <div className="flex flex-wrap gap-1.5 mb-2">
                 {items.map(ri => {
                   const ing = ingredients.find(i => i.id === ri.ingredient_id);
-                  // Show recipe in base units for precision
+                  const baseU = getBaseUnit(ing?.unit || "g");
                   return <span key={ri.id} className="text-[10px] bg-stone-100 px-2 py-1 rounded-lg">
-                    {ing?.name}: {fmtDec(ri.amount_per_jar)} {ing?.unit}
+                    {ing?.name}: {fmtDec(ri.amount_per_jar)} {baseU}
                   </span>;
                 })}
               </div>
