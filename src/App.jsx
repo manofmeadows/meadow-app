@@ -204,7 +204,7 @@ function PinScreen({ onAuth }) {
     <div className="min-h-screen bg-stone-50 flex items-center justify-center px-4">
       <div className={`bg-white rounded-3xl shadow-lg p-8 w-full max-w-xs text-center ${shake ? "animate-[shake_0.5s]" : ""}`}>
         <div className="text-5xl mb-3">🌿</div>
-        <h1 className="text-2xl font-bold text-stone-800 mb-1">Meadow</h1>
+        <img src="/logo.png" alt="Meadow" className="h-8 mx-auto mb-1" />
         <p className="text-sm text-stone-400 mb-6">Tuotannon hallinta</p>
         <Inp type="password" value={pin} onChange={setPin} placeholder="PIN" big
           onKeyDown={e => e.key === "Enter" && tryLogin()} autoFocus />
@@ -1084,9 +1084,9 @@ function Main() {
 
       <div className="bg-white border-b border-stone-200 px-4 py-3 sticky top-0 z-20">
         <div className="max-w-lg mx-auto flex items-center justify-between">
-          <div>
-            <h1 className="text-lg font-bold text-stone-800">🌿 Meadow</h1>
-            <p className="text-[11px] text-stone-400">{activeProducts.map(p => p.name).join(" · ")}</p>
+          <div className="flex items-center gap-2.5">
+            <img src="/logo.png" alt="Meadow" className="h-7" />
+            <span className="text-[11px] text-stone-400">Tuotannon hallinta</span>
           </div>
           <button onClick={() => setModal({ type: "settings" })} className="text-stone-400 hover:text-stone-600 p-2 rounded-lg hover:bg-stone-100">⚙️</button>
         </div>
