@@ -192,23 +192,34 @@ function Metric({ label, value, sub, alert }) {
 }
 
 // ─── AUTH ─────────────────────────────────────
-function PinScreen({ onAuth }) {
-  const [pin, setPin] = useState("");
-  const [shake, setShake] = useState(false);
-  const correct = import.meta.env.VITE_APP_PIN || "1234";
-  const tryLogin = () => {
-    if (pin === correct) { sessionStorage.setItem("meadow-auth", "1"); onAuth(); }
-    else { setShake(true); setPin(""); setTimeout(() => setShake(false), 500); }
+function LoginScreen({ onAuth }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const tryLogin = async () => {
+    if (!email || !password) return;
+    setLoading(true); setError("");
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    setLoading(false);
+    if (error) setError("Virheellinen sähköposti tai salasana");
+    else onAuth();
   };
+
   return (
     <div className="min-h-screen bg-stone-50 flex items-center justify-center px-4">
-      <div className={`bg-white rounded-3xl shadow-lg p-8 w-full max-w-xs text-center ${shake ? "animate-[shake_0.5s]" : ""}`}>
+      <div className="bg-white rounded-3xl shadow-lg p-8 w-full max-w-xs text-center">
         <div className="text-5xl mb-3">🌿</div>
         <img src="/logo.png" alt="Meadow" className="h-8 mx-auto mb-1" />
         <p className="text-sm text-stone-400 mb-6">Tuotannon hallinta</p>
-        <Inp type="password" value={pin} onChange={setPin} placeholder="PIN" big
-          onKeyDown={e => e.key === "Enter" && tryLogin()} autoFocus />
-        <Btn onClick={tryLogin} full color="emerald" className="mt-4 text-lg">Kirjaudu</Btn>
+        <Field label="Sähköposti"><Inp type="email" value={email} onChange={setEmail} placeholder="moi@meadow.fi" /></Field>
+        <Field label="Salasana"><Inp type="password" value={password} onChange={setPassword} placeholder="••••••••"
+          onKeyDown={e => e.key === "Enter" && tryLogin()} /></Field>
+        {error && <p className="text-red-500 text-sm mb-3">{error}</p>}
+        <Btn onClick={tryLogin} full color="emerald" className="text-lg" disabled={loading}>
+          {loading ? "Kirjaudutaan..." : "Kirjaudu"}
+        </Btn>
       </div>
     </div>
   );
@@ -216,12 +227,31 @@ function PinScreen({ onAuth }) {
 
 // ─── MAIN APP ────────────────────────────────
 export default function App() {
-  const [authed, setAuthed] = useState(sessionStorage.getItem("meadow-auth") === "1");
-  if (!authed) return <PinScreen onAuth={() => setAuthed(true)} />;
-  return <Main />;
+  const [session, setSession] = useState(null);
+  const [checking, setChecking] = useState(true);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      setChecking(false);
+    });
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+    });
+    return () => subscription.unsubscribe();
+  }, []);
+
+  if (checking) return (
+    <div className="min-h-screen bg-stone-50 flex items-center justify-center">
+      <div className="text-4xl animate-pulse">🌿</div>
+    </div>
+  );
+
+  if (!session) return <LoginScreen onAuth={() => {}} />;
+  return <Main onLogout={() => supabase.auth.signOut()} />;
 }
 
-function Main() {
+function Main({ onLogout }) {
   const data = useData();
   const [view, setView] = useState("dashboard");
   const [modal, setModal] = useState(null);
@@ -778,6 +808,9 @@ function Main() {
           <p className="text-xs text-stone-400 mt-1">Montako viikkoa puskuria haluat raaka-aineisiin</p>
         </Field>
         <div className="flex gap-2"><BtnOutline onClick={() => setModal(null)} full>Peruuta</BtnOutline><Btn onClick={save} full>Tallenna ✓</Btn></div>
+        <div className="mt-6 pt-4 border-t border-stone-200">
+          <button onClick={onLogout} className="w-full py-2.5 text-sm text-red-500 font-medium">Kirjaudu ulos</button>
+        </div>
       </Modal>
     );
   };
